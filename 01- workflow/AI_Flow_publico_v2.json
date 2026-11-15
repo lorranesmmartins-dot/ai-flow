@@ -1,0 +1,839 @@
+{
+  "name": "Processamento de notas fiscais de fornecedores",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Envio de nota fiscal de fornecedor",
+        "formDescription": "Anexe a nota fiscal em PDF. Os dados serão extraídos e validados automaticamente.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Nota fiscal (PDF)",
+              "fieldType": "file",
+              "multipleFiles": false,
+              "acceptFileTypes": ".pdf",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {
+          "path": "nota-fiscal-fornecedor",
+          "respondWithOptions": {
+            "values": {
+              "formSubmittedText": "Nota fiscal recebida. Ela será processada automaticamente."
+            }
+          }
+        }
+      },
+      "id": "eabd5f2a-8372-4238-9a61-73f27d713cc8",
+      "name": "Receber nota fiscal",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        -16,
+        80
+      ],
+      "webhookId": "a82c91d4-6e35-4b72-9f10-3c8d5a71e204"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "={{ Object.keys($binary)[0] }}",
+        "options": {}
+      },
+      "id": "67be4c40-1fd9-4b35-a44d-7db6ee447c5f",
+      "name": "Extrair texto do PDF",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.2,
+      "position": [
+        256,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "text": "={{ $json.text }}",
+        "attributes": {
+          "attributes": [
+            {
+              "name": "fornecedor",
+              "description": "Razão social ou nome do fornecedor emissor. Vazio se não constar no documento."
+            },
+            {
+              "name": "cnpj",
+              "description": "CNPJ do fornecedor emissor, exatamente como escrito no documento. Vazio se não constar."
+            },
+            {
+              "name": "numero_documento",
+              "description": "Número da nota fiscal / documento. Vazio se não constar."
+            },
+            {
+              "name": "valor_total",
+              "description": "Valor total da nota, exatamente como escrito (ex.: R$ 1.500,00). Vazio se não constar."
+            },
+            {
+              "name": "data_vencimento",
+              "description": "Data de vencimento do pagamento no formato AAAA-MM-DD. Vazio se não constar explicitamente."
+            }
+          ]
+        },
+        "options": {
+          "systemPromptTemplate": "Você extrai dados de notas fiscais de fornecedores brasileiras a partir do texto fornecido. Extraia somente informações que estejam explícitas no texto. Nunca invente, deduza, complete ou estime valores. Se um campo não estiver claramente presente ou houver dúvida, retorne string vazia para ele. Não confunda o CNPJ do fornecedor (emissor) com o CNPJ do tomador/destinatário."
+        }
+      },
+      "id": "65fe50a0-4436-44dc-944e-1be46d11fe6f",
+      "name": "Extrair campos com IA",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        496,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-3.5-flash-lite",
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "ad01ab42-d1b7-4e8e-8533-09a004ca9f37",
+      "name": "Modelo Gemini",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        576,
+        448
+      ],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "ID_CREDENCIAL_GEMINI",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const out = $json.output || {};\nlet text = '';\ntry { text = String($('Extrair texto do PDF').item.json.text || ''); } catch (e) { text = ''; }\nlet arquivo = '';\ntry {\n  const bin = $('Receber nota fiscal').item.binary || {};\n  const k = Object.keys(bin)[0];\n  arquivo = k ? (bin[k].fileName || '') : '';\n} catch (e) { arquivo = ''; }\n\nconst clean = (v) => (v === null || v === undefined) ? '' : String(v).trim();\nconst pendencias = [];\n\nfunction parseMoney(s) {\n  let t = clean(s).replace(/[^0-9,.-]/g, '');\n  if (!t) return null;\n  const hasComma = t.indexOf(',') >= 0;\n  const hasDot = t.indexOf('.') >= 0;\n  if (hasComma && hasDot) {\n    if (t.lastIndexOf(',') > t.lastIndexOf('.')) { t = t.replace(/\\./g, '').replace(',', '.'); }\n    else { t = t.replace(/,/g, ''); }\n  } else if (hasComma) {\n    t = t.replace(',', '.');\n  } else if (hasDot && /^\\d{1,3}(\\.\\d{3})+$/.test(t)) {\n    t = t.replace(/\\./g, '');\n  }\n  const n = Number(t);\n  return isFinite(n) ? n : null;\n}\n\nfunction validCnpj(c) {\n  if (c.length !== 14 || /^(\\d)\\1+$/.test(c)) return false;\n  const calc = (n) => {\n    let s = 0;\n    let p = n - 7;\n    for (let i = 0; i < n; i++) { s += Number(c[i]) * p; p--; if (p < 2) p = 9; }\n    const r = s % 11;\n    return r < 2 ? 0 : 11 - r;\n  };\n  return calc(12) === Number(c[12]) && calc(13) === Number(c[13]);\n}\n\nfunction toIso(s) {\n  const t = clean(s);\n  let m = t.match(/^(\\d{4})-(\\d{2})-(\\d{2})/);\n  let y, mo, d;\n  if (m) { y = m[1]; mo = m[2]; d = m[3]; }\n  else {\n    m = t.match(/^(\\d{2})[\\/.-](\\d{2})[\\/.-](\\d{4})$/);\n    if (!m) return '';\n    d = m[1]; mo = m[2]; y = m[3];\n  }\n  const dt = new Date(y + '-' + mo + '-' + d + 'T00:00:00Z');\n  if (isNaN(dt.getTime()) || dt.toISOString().slice(0, 10) !== (y + '-' + mo + '-' + d)) return '';\n  return y + '-' + mo + '-' + d;\n}\n\nfunction analisarValoresMonetarios(t) {\n  const re = /R\\$\\s*(\\d[\\d.,]*\\d|\\d)/g;\n  const encontrados = [];\n  let malformado = false;\n  let m;\n  while ((m = re.exec(t)) !== null) {\n    const tok = m[1];\n    let n = null;\n    if (/^(\\d{1,3}(\\.\\d{3})+|\\d+)(,\\d{2})?$/.test(tok)) {\n      n = Number(tok.replace(/\\./g, '').replace(',', '.'));\n    }\n    if (n === null || !isFinite(n)) malformado = true;\n    else encontrados.push({ digitos: tok.replace(/\\D/g, ''), centavos: Math.round(n * 100) });\n  }\n  let divergente = malformado;\n  for (let i = 0; i < encontrados.length && !divergente; i++) {\n    for (let j = i + 1; j < encontrados.length; j++) {\n      if (encontrados[i].digitos === encontrados[j].digitos && encontrados[i].centavos !== encontrados[j].centavos) { divergente = true; break; }\n    }\n  }\n  return divergente;\n}\n\nconst fornecedor = clean(out.fornecedor);\nconst cnpj = clean(out.cnpj).replace(/\\D/g, '');\nconst numero = clean(out.numero_documento);\nconst valor = parseMoney(out.valor_total);\nconst vencimento = toIso(out.data_vencimento);\nconst textoSemEspaco = text.replace(/\\s+/g, '');\nconst textoDigitos = text.replace(/\\D/g, '');\n\nif (text.replace(/\\s+/g, '').length < 30) {\n  pendencias.push('PDF sem texto legível (possível documento digitalizado/imagem): conferir manualmente');\n}\nif (!fornecedor) pendencias.push('Fornecedor ausente');\nelse if (text && !text.toLowerCase().replace(/\\s+/g, ' ').includes(fornecedor.toLowerCase().replace(/\\s+/g, ' '))) {\n  pendencias.push('Fornecedor extraído não aparece literalmente no documento');\n}\nif (!cnpj) pendencias.push('CNPJ ausente');\nelse {\n  if (!validCnpj(cnpj)) pendencias.push('CNPJ inválido (dígitos verificadores não conferem)');\n  if (text && !textoDigitos.includes(cnpj)) pendencias.push('CNPJ extraído não aparece no documento');\n}\nif (!numero) pendencias.push('Número do documento ausente');\nelse if (text && !textoSemEspaco.includes(numero.replace(/\\s+/g, ''))) {\n  pendencias.push('Número do documento extraído não aparece no documento');\n}\nif (valor === null) pendencias.push('Valor total ausente ou ilegível');\nelse {\n  if (valor <= 0) pendencias.push('Valor total deve ser maior que zero');\n  const centavos = String(Math.round(valor * 100));\n  const inteiro = String(Math.round(valor));\n  if (text && !textoDigitos.includes(centavos) && !textoDigitos.includes(inteiro)) {\n    pendencias.push('Valor total extraído não aparece no documento');\n  }\n}\nif (text && analisarValoresMonetarios(text)) {\n  pendencias.push('Divergência entre valores monetários encontrados no documento — revisão humana obrigatória');\n}\nif (!clean(out.data_vencimento)) pendencias.push('Data de vencimento ausente');\nelse if (!vencimento) pendencias.push('Data de vencimento em formato inválido');\nelse {\n  const p = vencimento.split('-');\n  const variantes = [p[2] + '/' + p[1] + '/' + p[0], p[2] + '-' + p[1] + '-' + p[0], p[2] + '.' + p[1] + '.' + p[0], vencimento];\n  if (text && !variantes.some((v) => textoSemEspaco.includes(v))) {\n    pendencias.push('Data de vencimento extraída não aparece no documento');\n  }\n}\n\nconst cnpjFmt = cnpj.length === 14\n  ? cnpj.replace(/^(\\d{2})(\\d{3})(\\d{3})(\\d{4})(\\d{2})$/, '$1.$2.$3/$4-$5')\n  : cnpj;\n\nreturn {\n  json: {\n    status: pendencias.length === 0 ? 'Validado' : 'Revisão necessária',\n    fornecedor,\n    cnpj: cnpjFmt,\n    numero_documento: numero,\n    valor_total: valor,\n    data_vencimento: vencimento,\n    arquivo,\n    pendencias,\n    pendencias_texto: pendencias.join(' | '),\n    registrado_em: $now.toFormat('yyyy-MM-dd HH:mm'),\n  },\n};"
+      },
+      "id": "9ac15c27-84ac-4592-8d1e-7d26df07c4b9",
+      "name": "Validar campos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "Validado",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "id": "844ab3fb-a4c1-432d-a117-2de297b8a765"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1dd93e8f-db99-47c6-88c4-7d64ae32eee0",
+      "name": "Documento válido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        1024,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "ID_DA_PLANILHA_A_CONFIGURAR",
+          "mode": "list",
+          "cachedResultName": "AI Finance Hub – Controle de Notas Fiscais.",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/ID_DA_PLANILHA_A_CONFIGURAR/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Notas Fiscais",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/ID_DA_PLANILHA_A_CONFIGURAR/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Registrado em": "={{ $json.registrado_em }}",
+            "Fornecedor": "={{ $json.fornecedor }}",
+            "CNPJ": "={{ $json.cnpj }}",
+            "Número do Documento": "={{ $json.numero_documento }}",
+            "Valor Total": "={{ $json.valor_total }}",
+            "Data de Vencimento": "={{ $json.data_vencimento }}",
+            "Arquivo": "={{ $json.arquivo }}",
+            "Status Pagamento": "Pendente"
+          },
+          "schema": [
+            {
+              "id": "Registrado em",
+              "displayName": "Registrado em",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Fornecedor",
+              "displayName": "Fornecedor",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "CNPJ",
+              "displayName": "CNPJ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Número do Documento",
+              "displayName": "Número do Documento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Valor Total",
+              "displayName": "Valor Total",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Data de Vencimento",
+              "displayName": "Data de Vencimento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Arquivo",
+              "displayName": "Arquivo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "Status Pagamento",
+              "displayName": "Status Pagamento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            }
+          ]
+        },
+        "options": {
+          "cellFormat": "RAW"
+        }
+      },
+      "id": "e642c567-cb1f-49c0-a2bf-24edaaaa2f0a",
+      "name": "Registrar nota na planilha",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1440,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ID_CREDENCIAL_GOOGLE_SHEETS",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "ID_DA_PLANILHA_A_CONFIGURAR",
+          "mode": "list",
+          "cachedResultName": "AI Finance Hub – Controle de Notas Fiscais.",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/ID_DA_PLANILHA_A_CONFIGURAR/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1212706838,
+          "mode": "list",
+          "cachedResultName": "Revisao humana ",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/ID_DA_PLANILHA_A_CONFIGURAR/edit#gid=1212706838"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Registrado em": "={{ $json.registrado_em }}",
+            "Fornecedor (extraído)": "={{ $json.fornecedor }}",
+            "CNPJ (extraído)": "={{ $json.cnpj }}",
+            "Número do Documento (extraído)": "={{ $json.numero_documento }}",
+            "Pendências": "={{ $json.pendencias_texto }}",
+            "Arquivo": "={{ $json.arquivo }}",
+            "Status Revisão": "Aguardando revisão",
+            "Valor Total": "={{ $json.valor_total ?? '' }}",
+            "Data de Vencimento": "={{ $json.data_vencimento }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Registrado em",
+              "displayName": "Registrado em",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Fornecedor (extraído)",
+              "displayName": "Fornecedor (extraído)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "CNPJ (extraído)",
+              "displayName": "CNPJ (extraído)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Número do Documento (extraído)",
+              "displayName": "Número do Documento (extraído)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Valor Total",
+              "displayName": "Valor Total",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Data de Vencimento",
+              "displayName": "Data de Vencimento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Pendências",
+              "displayName": "Pendências",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Arquivo",
+              "displayName": "Arquivo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Status Revisão",
+              "displayName": "Status Revisão",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "cellFormat": "RAW"
+        }
+      },
+      "id": "2223fca7-f5b3-4bda-8b82-d7764f8a7118",
+      "name": "Registrar na fila de revisão",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2064,
+        720
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ID_CREDENCIAL_GOOGLE_SHEETS",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "SEU_EMAIL_AQUI@example.com",
+        "subject": "=Nota fiscal para revisão: {{ $('Validar campos').item.json.arquivo || 'sem nome' }}",
+        "message": "=<p>Uma nota fiscal precisa de revisão humana. Nenhum dado foi preenchido por suposição.</p><p><b>Arquivo:</b> {{ $('Validar campos').item.json.arquivo }}</p><p><b>Pendências:</b> {{ $('Validar campos').item.json.pendencias_texto }}</p><p>Detalhes na aba <b>Revisão Humana</b> da planilha.</p>",
+        "options": {}
+      },
+      "id": "7007f377-5a96-453b-8c36-dbaa3eb8a067",
+      "name": "Avisar revisor",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        2288,
+        720
+      ],
+      "webhookId": "b93e71c5-4a62-4d80-8f21-6c5a9e3d702b",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "ID_CREDENCIAL_GMAIL",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "id": "05c8c9ae-9769-47dc-a510-89ff7c752abd",
+      "name": "Verificação diária de vencimentos",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "ID_DA_PLANILHA_A_CONFIGURAR",
+          "mode": "list",
+          "cachedResultName": "AI Finance Hub – Controle de Notas Fiscais.",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/ID_DA_PLANILHA_A_CONFIGURAR/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Notas Fiscais",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/ID_DA_PLANILHA_A_CONFIGURAR/edit#gid=0"
+        },
+        "options": {}
+      },
+      "id": "7262d7ff-1d68-4de2-94be-69a0dbdd330c",
+      "name": "Ler notas registradas",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        272,
+        1088
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ID_CREDENCIAL_GOOGLE_SHEETS",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "dias-para-vencer",
+              "name": "dias_para_vencer",
+              "type": "number",
+              "value": "={{ DateTime.fromISO(String($json['Data de Vencimento'])).startOf('day').diff($today, 'days').days }}"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "d426406e-c9a7-4a91-bc33-2376d5b19bb2",
+      "name": "Calcular dias até o vencimento",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        496,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.dias_para_vencer }}",
+              "rightValue": 3,
+              "operator": {
+                "type": "number",
+                "operation": "lte"
+              },
+              "id": "2069792b-cf0d-4b42-bba3-7b397814e6c2"
+            },
+            {
+              "leftValue": "={{ $json['Status Pagamento'] }}",
+              "rightValue": "Pago",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              },
+              "id": "d47e5103-2653-42d9-afa5-bc2ad78cb539"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4df555f9-0d8e-4899-8ccd-4960f4bcd73b",
+      "name": "Vencendo em até 3 dias ou vencidas",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.4,
+      "position": [
+        720,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "destinationFieldName": "notas",
+        "options": {}
+      },
+      "id": "c7b0a63e-c800-4790-ac57-bc5046641107",
+      "name": "Reunir alertas",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        944,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "SEU_EMAIL_AQUI@example.com",
+        "subject": "=Alerta: {{ $json.notas.length }} nota(s) vencendo ou vencidas",
+        "message": "=<p>Notas fiscais que vencem em até 3 dias ou já venceram e não estão como Pago:</p><ul>{{ $json.notas.map(n => '<li><b>' + n['Fornecedor'] + '</b> - NF ' + n['Número do Documento'] + ' - R$ ' + n['Valor Total'] + ' - vencimento ' + n['Data de Vencimento'] + ' (' + (n.dias_para_vencer < 0 ? 'VENCIDA há ' + Math.abs(n.dias_para_vencer) + ' dia(s)' : n.dias_para_vencer === 0 ? 'vence HOJE' : 'vence em ' + n.dias_para_vencer + ' dia(s)') + ')</li>').join('') }}</ul>",
+        "options": {}
+      },
+      "id": "155446b4-a3d8-4c0a-bda9-c8990f95b7e5",
+      "name": "Enviar alerta de vencimento",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1168,
+        1088
+      ],
+      "webhookId": "c64f2a91-8d37-4b50-a6e3-9f1c7d2b8450",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "ID_CREDENCIAL_GMAIL",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "models/gemini-3.5-flash-lite",
+          "mode": "list",
+          "cachedResultName": "Gemini 3.5 Flash Lite"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "Responda apenas: conexão funcionando."
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "92bed9f0-4143-4a92-9db5-3ed33ff3e450",
+      "name": "Message a model",
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        64,
+        1408
+      ],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "ID_CREDENCIAL_GEMINI",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Receber nota fiscal": {
+      "main": [
+        [
+          {
+            "node": "Extrair texto do PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extrair texto do PDF": {
+      "main": [
+        [
+          {
+            "node": "Extrair campos com IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extrair campos com IA": {
+      "main": [
+        [
+          {
+            "node": "Validar campos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Modelo Gemini": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Extrair campos com IA",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar campos": {
+      "main": [
+        [
+          {
+            "node": "Documento válido?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Documento válido?": {
+      "main": [
+        [
+          {
+            "node": "Registrar nota na planilha",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Registrar na fila de revisão",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar na fila de revisão": {
+      "main": [
+        [
+          {
+            "node": "Avisar revisor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verificação diária de vencimentos": {
+      "main": [
+        [
+          {
+            "node": "Ler notas registradas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ler notas registradas": {
+      "main": [
+        [
+          {
+            "node": "Calcular dias até o vencimento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calcular dias até o vencimento": {
+      "main": [
+        [
+          {
+            "node": "Vencendo em até 3 dias ou vencidas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vencendo em até 3 dias ou vencidas": {
+      "main": [
+        [
+          {
+            "node": "Reunir alertas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reunir alertas": {
+      "main": [
+        [
+          {
+            "node": "Enviar alerta de vencimento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "VERSION_ID_REMOVIDO",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "INSTANCE_ID_REMOVIDO"
+  },
+  "nodeGroups": [
+    {
+      "id": "8a060eec-c85d-45bd-b89f-88f076a6ce54",
+      "name": "Ler nota fiscal",
+      "nodeIds": [
+        "67be4c40-1fd9-4b35-a44d-7db6ee447c5f",
+        "65fe50a0-4436-44dc-944e-1be46d11fe6f",
+        "ad01ab42-d1b7-4e8e-8533-09a004ca9f37"
+      ],
+      "description": "Converte o PDF recebido em texto e usa IA (Gemini) para extrair os cinco campos, sem inventar dados ausentes"
+    },
+    {
+      "id": "63350887-06fc-4550-b134-d9838321e882",
+      "name": "Validar dados",
+      "nodeIds": [
+        "9ac15c27-84ac-4592-8d1e-7d26df07c4b9",
+        "1dd93e8f-db99-47c6-88c4-7d64ae32eee0"
+      ],
+      "description": "Confere formato do CNPJ, valor e data e compara cada campo com o texto do PDF para achar faltas ou divergências"
+    },
+    {
+      "id": "7244206d-c69a-4672-aedb-d6991a6b5942",
+      "name": "Encaminhar para revisão",
+      "nodeIds": [
+        "2223fca7-f5b3-4bda-8b82-d7764f8a7118",
+        "7007f377-5a96-453b-8c36-dbaa3eb8a067"
+      ],
+      "description": "Notas incompletas ou divergentes vão para a aba de revisão humana e o revisor recebe um aviso por e-mail"
+    },
+    {
+      "id": "4126306d-0d48-4bd2-8d58-759b1def5d26",
+      "name": "Alertar vencimentos",
+      "nodeIds": [
+        "7262d7ff-1d68-4de2-94be-69a0dbdd330c",
+        "d426406e-c9a7-4a91-bc33-2376d5b19bb2",
+        "4df555f9-0d8e-4899-8ccd-4960f4bcd73b",
+        "c7b0a63e-c800-4790-ac57-bc5046641107",
+        "155446b4-a3d8-4c0a-bda9-c8990f95b7e5"
+      ],
+      "description": "Todo dia às 8h lê a planilha e envia um e-mail com notas não pagas que vencem em até 3 dias ou já venceram"
+    }
+  ],
+  "id": "WORKFLOW_ID_REMOVIDO",
+  "tags": []
+}
