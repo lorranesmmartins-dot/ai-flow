@@ -6,6 +6,10 @@ O AI Flow é um fluxo de automação desenvolvido com n8n para apoiar o controle
 
 O projeto utiliza inteligência artificial para extrair informações de documentos fiscais, aplica validações para reduzir inconsistências e direciona os registros para os destinos adequados. Também realiza verificações diárias de vencimentos e envia alertas por e-mail.
 
+### Visão geral do workflow
+
+![Visão geral do AI Flow](02-evidencias/Prints/01-visao-geral.png)
+
 ## Objetivos
 
 - Automatizar a leitura e o processamento de notas fiscais.
